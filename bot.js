@@ -4,12 +4,13 @@
 const mc = require('minecraft-protocol');
 const { autoVersionForge } = require('minecraft-protocol-forge');
 const dns = require('node:dns').promises;
-const net = require('node:net');
 
 const HOST = (process.env.MC_HOST || '').trim().replace(/\.$/, '');
 const USERNAME = (process.env.MC_USERNAME || 'ActionBot').trim();
-const ENV_PORT = Number(process.env.MC_PORT || 25565);
+
+const FALLBACK_PORT = 25565;
 const RETRY_DELAY = 15000;
+const CONNECTION_TIMEOUT = 60000;
 
 if (!HOST) {
   console.error('ERROR: MC_HOST is missing.');
@@ -21,44 +22,37 @@ if (!USERNAME) {
   process.exit(1);
 }
 
-if (!Number.isInteger(ENV_PORT) || ENV_PORT < 1 || ENV_PORT > 65535) {
-  console.error('ERROR: MC_PORT must be a valid port.');
-  process.exit(1);
-}
-
-// Resolve the actual destination using Minecraft DNS SRV.
 async function resolveMinecraftAddress() {
   try {
     const records = await dns.resolveSrv(`_minecraft._tcp.${HOST}`);
 
     if (records.length > 0) {
-      records.sort((a, b) =>
-        a.priority - b.priority || b.weight - a.weight
-      );
+      records.sort((a, b) => a.priority - b.priority);
 
       const record = records[0];
-      const target = record.name.replace(/\.$/, '');
+      const targetHost = record.name.replace(/\.$/, '');
 
-      console.log(`DNS SRV found: ${target}:${record.port}`);
+      console.log(`SRV record found: ${targetHost}:${record.port}`);
 
       return {
-        targetHost: target,
-        targetPort: record.port
+        host: targetHost,
+        port: record.port
       };
     }
   } catch (error) {
-    if (error.code !== 'ENODATA' &&
-        error.code !== 'ENOTFOUND' &&
-        error.code !== 'ESERVFAIL') {
-      console.log(`SRV lookup warning: ${error.message}`);
-    }
+    console.log(
+      `SRV lookup failed (${error.code || error.message}).`
+    );
   }
 
-  console.log(`No SRV record found; using ${HOST}:${ENV_PORT}`);
+  // Match normal Minecraft Java address behavior when SRV is absent.
+  console.log(
+    `Using default Minecraft port: ${HOST}:${FALLBACK_PORT}`
+  );
 
   return {
-    targetHost: HOST,
-    targetPort: ENV_PORT
+    host: HOST,
+    port: FALLBACK_PORT
   };
 }
 
@@ -68,67 +62,40 @@ function sleep(ms) {
 
 function connectOnce(address) {
   return new Promise(resolve => {
+    let client;
     let finished = false;
+    let watchdog;
 
-    const finish = () => {
+    function finish() {
       if (finished) return;
+
       finished = true;
+      clearTimeout(watchdog);
       resolve();
-    };
+    }
 
     console.log(
-      `Connecting as ${USERNAME} to ` +
-      `${address.targetHost}:${address.targetPort}...`
+      `Connecting as ${USERNAME} to ${address.host}:${address.port}...`
     );
-
-    let client;
 
     try {
       client = mc.createClient({
-        host: HOST,
-        port: address.targetPort,
+        host: address.host,
+        port: address.port,
+
+        // Send the original hostname in the Minecraft handshake.
+        fakeHost: HOST,
+
         username: USERNAME,
         auth: 'offline',
         version: false,
-        keepAlive: true,
-
-        // Preserve the hostname used by the Minecraft client.
-        fakeHost: HOST,
-
-        // Connect the TCP socket to the SRV destination.
-        connect: (clientInstance) => {
-          const socket = net.createConnection({
-            host: address.targetHost,
-            port: address.targetPort
-          });
-
-          clientInstance.setSocket(socket);
-
-          socket.setTimeout(20000);
-
-          socket.on('connect', () => {
-            console.log('TCP connection established.');
-            clientInstance.emit('connect');
-          });
-
-          socket.on('timeout', () => {
-            socket.destroy(new Error('Connection timed out.'));
-          });
-
-          socket.on('error', error => {
-            console.error(`Socket error: ${error.message}`);
-          });
-        }
+        keepAlive: true
       });
 
       autoVersionForge(client);
 
       client.on('login', () => {
-        console.log(`Logged in successfully as ${USERNAME}.`);
-      });
-
-      client.on('playerJoin', () => {
-        console.log('Player joined the game.');
+        console.log(`Successfully logged in as ${USERNAME}.`);
       });
 
       client.on('end', reason => {
@@ -139,10 +106,19 @@ function connectOnce(address) {
       client.on('error', error => {
         console.error(`Minecraft error: ${error.message}`);
       });
+
+      watchdog = setTimeout(() => {
+        console.log('Connection lasted too long without disconnecting.');
+        try {
+          client.end('Connection watchdog timeout');
+        } catch (_) {
+          // The connection may already be closed.
+        }
+        finish();
+      }, CONNECTION_TIMEOUT);
     } catch (error) {
       console.error(`Connection setup failed: ${error.message}`);
       finish();
-      return;
     }
   });
 }
@@ -166,6 +142,6 @@ async function main() {
 }
 
 main().catch(error => {
-  console.error(error);
+  console.error(`Fatal error: ${error.message}`);
   process.exit(1);
 });
