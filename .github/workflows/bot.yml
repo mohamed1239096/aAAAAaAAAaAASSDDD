@@ -1,0 +1,33 @@
+name: Minecraft Bot
+
+on:
+  workflow_dispatch:        # start manually from the Actions tab
+  schedule:
+    - cron: '0 */6 * * *'   # restart every 6 hours (a job can run max ~6h)
+
+# Never run two bots at once (same username would kick itself).
+concurrency:
+  group: minecraft-bot
+  cancel-in-progress: false
+
+jobs:
+  run-bot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350    # stop just before GitHub's 6h limit
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Run bot
+        env:
+          MC_HOST: ${{ secrets.MC_HOST }}
+          MC_PORT: ${{ secrets.MC_PORT }}
+          MC_USERNAME: ${{ secrets.MC_USERNAME }}
+        run: node bot.js
