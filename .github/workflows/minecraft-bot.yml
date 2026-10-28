@@ -1,8 +1,8 @@
+
 name: Minecraft 1.7.10 Bot
 
 on:
   workflow_dispatch:
-
   schedule:
     - cron: '17 0,6,12,18 * * *'
 
@@ -25,17 +25,15 @@ jobs:
 
     steps:
       - name: Download repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@v4
 
       - name: Set up Node.js
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@v4
         with:
           node-version: '22'
 
-      - name: Install Minecraft protocol libraries
-        run: |
-          npm init -y
-          npm install minecraft-protocol minecraft-protocol-forge
+      - name: Install dependencies
+        run: npm install minecraft-protocol minecraft-protocol-forge
 
       - name: Run bot
         run: node bot.js
