@@ -1,17 +1,22 @@
 // Minecraft 1.7.10 Forge bot
 // Joins the server, completes the Forge (FML) handshake using the server's own
 // mod list, stays online, and reconnects automatically if it gets disconnected.
+//
+// Address handling: if MC_PORT is empty, the bot looks up the SRV record
+// (_minecraft._tcp.<host>) exactly like the Minecraft client does when you
+// join with only a hostname. If MC_PORT is set, that port is used directly.
 
+const dns = require('dns').promises
 const mc = require('minecraft-protocol')
 const forge = require('minecraft-protocol-forge')
 
-const HOST = process.env.MC_HOST
-const PORT = parseInt(process.env.MC_PORT || '25565', 10)
-const USERNAME = process.env.MC_USERNAME || 'ServerBot'
+const CONFIG_HOST = (process.env.MC_HOST || '').trim()
+const CONFIG_PORT = (process.env.MC_PORT || '').trim()
+const USERNAME = (process.env.MC_USERNAME || 'ServerBot').trim()
 const VERSION = '1.7.10'
 const RECONNECT_DELAY_MS = 15000
 
-if (!HOST) {
+if (!CONFIG_HOST) {
   console.error('MC_HOST is not set. Add it as a GitHub secret.')
   process.exit(1)
 }
@@ -20,11 +25,40 @@ function log (...args) {
   console.log(new Date().toISOString(), ...args)
 }
 
-function start () {
-  log(`Pinging ${HOST}:${PORT} ...`)
+// Work out the real host/port to connect to.
+async function resolveAddress () {
+  if (CONFIG_PORT) {
+    return { host: CONFIG_HOST, port: parseInt(CONFIG_PORT, 10) }
+  }
+
+  try {
+    const records = await dns.resolveSrv(`_minecraft._tcp.${CONFIG_HOST}`)
+    if (records.length > 0) {
+      records.sort((a, b) => a.priority - b.priority || b.weight - a.weight)
+      const r = records[0]
+      log(`SRV record found: ${CONFIG_HOST} -> ${r.name}:${r.port}`)
+      return { host: r.name, port: r.port }
+    }
+  } catch (e) {
+    log(`No SRV record for ${CONFIG_HOST} (${e.code || e.message}), using default port 25565`)
+  }
+
+  return { host: CONFIG_HOST, port: 25565 }
+}
+
+async function start () {
+  let addr
+  try {
+    addr = await resolveAddress()
+  } catch (e) {
+    log('Address lookup failed:', e.message)
+    return setTimeout(start, RECONNECT_DELAY_MS)
+  }
+
+  log(`Pinging ${addr.host}:${addr.port} ...`)
 
   // Ping first so we can copy the server's mod list for the Forge handshake.
-  mc.ping({ host: HOST, port: PORT, version: VERSION }, (err, result) => {
+  mc.ping({ host: addr.host, port: addr.port, version: VERSION }, (err, result) => {
     if (err) {
       log('Ping failed:', err.message)
       return setTimeout(start, RECONNECT_DELAY_MS)
@@ -34,17 +68,17 @@ function start () {
     log(`Server reports ${modList.length} Forge mod(s):`,
       modList.map(m => `${m.modid}@${m.version}`).join(', '))
 
-    connect(modList)
+    connect(addr, modList)
   })
 }
 
-function connect (modList) {
+function connect (addr, modList) {
   const client = mc.createClient({
-    host: HOST,
-    port: PORT,
+    host: addr.host,
+    port: addr.port,
     username: USERNAME,
     version: VERSION,
-    // No password => offline mode. Server needs online-mode=false.
+    // No password => offline mode.
     keepAlive: true
   })
 
