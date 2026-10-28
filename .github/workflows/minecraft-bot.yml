@@ -1,0 +1,41 @@
+name: Minecraft 1.7.10 Bot
+
+on:
+  workflow_dispatch:
+
+  schedule:
+    - cron: '17 0,6,12,18 * * *'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: minecraft-1710-bot
+  cancel-in-progress: false
+
+jobs:
+  run-bot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 355
+
+    env:
+      MC_HOST: ${{ secrets.MC_HOST }}
+      MC_PORT: ${{ secrets.MC_PORT }}
+      MC_USERNAME: ${{ secrets.MC_USERNAME }}
+
+    steps:
+      - name: Download repository
+        uses: actions/checkout@v6
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+
+      - name: Install Minecraft protocol library
+        run: |
+          npm init -y
+          npm install minecraft-protocol
+
+      - name: Run bot
+        run: node bot.js
