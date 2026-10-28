@@ -51,7 +51,8 @@ jobs:
           let dir = path.dirname(
             require.resolve('minecraft-protocol-forge')
           );
-          let root = null;
+
+          let root;
 
           while (true) {
             const manifest = path.join(dir, 'package.json');
@@ -73,7 +74,7 @@ jobs:
 
             if (parent === dir) {
               throw new Error(
-                'Could not locate minecraft-protocol-forge package root.'
+                'Could not locate minecraft-protocol-forge package.'
               );
             }
 
@@ -89,10 +90,10 @@ jobs:
 
           let source = fs.readFileSync(file, 'utf8');
 
-          const marker =
-            '    case FMLHandshakeClientState.WAITINGSERVERCOMPLETE: {\n';
+          const statePattern =
+            /(case\s+FMLHandshakeClientState\.WAITINGSERVERCOMPLETE:\s*\{)/;
 
-          if (!source.includes(marker)) {
+          if (!statePattern.test(source)) {
             throw new Error(
               'Could not locate WAITINGSERVERCOMPLETE in Forge source.'
             );
@@ -100,6 +101,7 @@ jobs:
 
           if (!source.includes('PATCH_1710_ACK_PHASE2')) {
             const patch = [
+              '',
               '      // PATCH_1710_ACK_PHASE2',
               "      if (client.version === '1.7.10' && parsed.data.discriminator === 'HandshakeAck' && parsed.data.phase === 2) {",
               "        debug('1.7.10 compatibility: received HandshakeAck phase 2');",
@@ -110,7 +112,10 @@ jobs:
               ''
             ].join('\n');
 
-            source = source.replace(marker, marker + patch);
+            source = source.replace(
+              statePattern,
+              match => match + patch
+            );
           }
 
           const listenerPattern =
