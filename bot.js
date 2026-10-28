@@ -1,4 +1,5 @@
 const mc = require('minecraft-protocol');
+const { autoVersionForge } = require('minecraft-protocol-forge');
 
 const HOST = (process.env.MC_HOST || '').trim();
 const PORT = Number(process.env.MC_PORT || 25565);
@@ -75,12 +76,12 @@ function connectOnce() {
         host: HOST,
         port: PORT,
         username: USERNAME,
-        version: '1.7.10',
+        version: false,
         auth: 'offline',
         keepAlive: true
       });
 
-      activeClient = client;
+autoVersionForge(client);
 
       client.on('login', () => {
         if (loginTimer) {
