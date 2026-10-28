@@ -23,7 +23,7 @@ jobs:
       MC_USERNAME: ${{ secrets.MC_USERNAME }}
 
     steps:
-      - name: Download repository
+      - name: Checkout repository
         uses: actions/checkout@v4
 
       - name: Set up Node.js
@@ -31,8 +31,16 @@ jobs:
         with:
           node-version: '22'
 
-      - name: Install dependencies
-        run: npm install minecraft-protocol minecraft-protocol-forge
+      - name: Install updated Minecraft dependencies
+        run: |
+          if [ ! -f package.json ]; then
+            npm init -y
+          fi
+
+          npm install --no-audit --no-fund \
+            minecraft-protocol@latest \
+            minecraft-protocol-forge@latest \
+            minecraft-data@latest
 
       - name: Run bot
         run: node bot.js
