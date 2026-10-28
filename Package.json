@@ -1,0 +1,14 @@
+{
+  "name": "mc-bot",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Minecraft 1.7.10 Forge bot that joins a server (runs on GitHub Actions)",
+  "main": "bot.js",
+  "scripts": {
+    "start": "node bot.js"
+  },
+  "dependencies": {
+    "minecraft-protocol": "^1.47.0",
+    "minecraft-protocol-forge": "^1.0.0"
+  }
+}
