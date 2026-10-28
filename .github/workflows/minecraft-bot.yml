@@ -24,12 +24,13 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: '22'
+          package-manager-cache: false
 
       - name: Install dependencies
         run: |
@@ -47,9 +48,40 @@ jobs:
           const fs = require('node:fs');
           const path = require('node:path');
 
-          const entry = require.resolve('minecraft-protocol-forge');
+          let dir = path.dirname(
+            require.resolve('minecraft-protocol-forge')
+          );
+          let root = null;
+
+          while (true) {
+            const manifest = path.join(dir, 'package.json');
+
+            if (fs.existsSync(manifest)) {
+              try {
+                const pkg = JSON.parse(
+                  fs.readFileSync(manifest, 'utf8')
+                );
+
+                if (pkg.name === 'minecraft-protocol-forge') {
+                  root = dir;
+                  break;
+                }
+              } catch (_) {}
+            }
+
+            const parent = path.dirname(dir);
+
+            if (parent === dir) {
+              throw new Error(
+                'Could not locate minecraft-protocol-forge package root.'
+              );
+            }
+
+            dir = parent;
+          }
+
           const file = path.join(
-            path.dirname(entry),
+            root,
             'src',
             'client',
             'forgeHandshake.js'
@@ -57,100 +89,59 @@ jobs:
 
           let source = fs.readFileSync(file, 'utf8');
 
-          const waitMarker =
+          const marker =
             '    case FMLHandshakeClientState.WAITINGSERVERCOMPLETE: {\n';
 
-          if (!source.includes(waitMarker)) {
+          if (!source.includes(marker)) {
             throw new Error(
-              'Could not find WAITINGSERVERCOMPLETE in Forge library.'
+              'Could not locate WAITINGSERVERCOMPLETE in Forge source.'
             );
           }
 
-          if (!source.includes('PATCH_1710_ACK_FALLBACK_WAIT')) {
-            const patch = `
-              // PATCH_1710_ACK_FALLBACK_WAIT
-              if (
-                client.version === '1.7.10' &&
-                parsed.data.discriminator === 'HandshakeAck'
-              ) {
-                if (parsed.data.phase === 2) {
-                  debug('1.7.10: handling early HandshakeAck phase 2');
-                  writeAck(
-                    client,
-                    FMLHandshakeClientState.WAITINGSERVERCOMPLETE
-                  );
-                  client.fmlHandshakeState =
-                    FMLHandshakeClientState.PENDINGCOMPLETE;
-                  break;
-                }
+          if (!source.includes('PATCH_1710_ACK_PHASE2')) {
+            const patch = [
+              '      // PATCH_1710_ACK_PHASE2',
+              "      if (client.version === '1.7.10' && parsed.data.discriminator === 'HandshakeAck' && parsed.data.phase === 2) {",
+              "        debug('1.7.10 compatibility: received HandshakeAck phase 2');",
+              '        writeAck(client, FMLHandshakeClientState.WAITINGSERVERCOMPLETE);',
+              '        client.fmlHandshakeState = FMLHandshakeClientState.PENDINGCOMPLETE;',
+              '        break;',
+              '      }',
+              ''
+            ].join('\n');
 
-                if (parsed.data.phase === 3) {
-                  debug('1.7.10: handling HandshakeAck phase 3');
-                  writeAck(client, FMLHandshakeClientState.COMPLETE);
-                  client.fmlHandshakeState =
-                    FMLHandshakeClientState.COMPLETE;
-                  break;
-                }
-              }
-
-          `;
-
-            source = source.replace(waitMarker, waitMarker + patch);
+            source = source.replace(marker, marker + patch);
           }
 
-          const pendingMarker =
-            '    case FMLHandshakeClientState.PENDINGCOMPLETE: {\n';
+          const listenerPattern =
+            /if \(packet\.channel === 'FML\|HS'\) \{\s*fmlHandshakeStep\(client, packet\.data, options\)\s*\}/;
 
-          if (!source.includes(pendingMarker)) {
-            throw new Error(
-              'Could not find PENDINGCOMPLETE in Forge library.'
+          if (listenerPattern.test(source)) {
+            const replacement = [
+              "if (packet.channel === 'FML|HS') {",
+              '  try {',
+              '    fmlHandshakeStep(client, packet.data, options)',
+              '  } catch (error) {',
+              "    console.error('Forge handshake failed:', error.message)",
+              "    client.end('Forge handshake failed')",
+              '  }',
+              '}'
+            ].join('\n');
+
+            source = source.replace(
+              listenerPattern,
+              replacement
             );
-          }
-
-          if (!source.includes('PATCH_1710_ACK_FALLBACK_PENDING')) {
-            const patch = `
-              // PATCH_1710_ACK_FALLBACK_PENDING
-              if (
-                client.version === '1.7.10' &&
-                parsed.data.discriminator === 'HandshakeAck' &&
-                parsed.data.phase === 3
-              ) {
-                debug('1.7.10: completing alternate handshake');
-                writeAck(client, FMLHandshakeClientState.COMPLETE);
-                client.fmlHandshakeState =
-                  FMLHandshakeClientState.COMPLETE;
-                break;
-              }
-
-          `;
-
-            source = source.replace(pendingMarker, pendingMarker + patch);
-          }
-
-          const listenerOld = \`    if (packet.channel === 'FML|HS') {
-                fmlHandshakeStep(client, packet.data, options)
-              }\`;
-
-          const listenerNew = \`    if (packet.channel === 'FML|HS') {
-                try {
-                  fmlHandshakeStep(client, packet.data, options)
-                } catch (error) {
-                  debug('Forge handshake failed:', error.message)
-                  client.emit('error', error)
-                  client.end('Forge handshake failed')
-                }
-              }\`;
-
-          if (source.includes(listenerOld)) {
-            source = source.replace(listenerOld, listenerNew);
           } else if (!source.includes('Forge handshake failed:')) {
             throw new Error(
-              'Could not safely patch the Forge handshake listener.'
+              'Could not locate Forge handshake listener.'
             );
           }
 
           fs.writeFileSync(file, source);
+
           console.log('Legacy Forge handshake patch applied.');
+          console.log('Patched file: ' + file);
           NODE
 
       - name: Run bot
