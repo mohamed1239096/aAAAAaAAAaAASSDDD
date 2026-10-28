@@ -8,7 +8,6 @@
     "start": "node bot.js"
   },
   "dependencies": {
-    "minecraft-protocol": "^1.47.0",
-    "minecraft-protocol-forge": "^1.0.0"
+    "minecraft-protocol": "^1.47.0"
   }
 }
