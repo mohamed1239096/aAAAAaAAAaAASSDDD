@@ -20,7 +20,6 @@ jobs:
 
     env:
       MC_HOST: ${{ secrets.MC_HOST }}
-      MC_PORT: ${{ secrets.MC_PORT }}
       MC_USERNAME: ${{ secrets.MC_USERNAME }}
 
     steps:
