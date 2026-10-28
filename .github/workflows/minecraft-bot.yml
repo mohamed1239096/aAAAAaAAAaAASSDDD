@@ -32,10 +32,10 @@ jobs:
         with:
           node-version: '22'
 
-      - name: Install Minecraft protocol library
+      - name: Install Minecraft protocol libraries
         run: |
           npm init -y
-          npm install minecraft-protocol
+          npm install minecraft-protocol minecraft-protocol-forge
 
       - name: Run bot
         run: node bot.js
