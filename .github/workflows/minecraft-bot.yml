@@ -31,7 +31,7 @@ jobs:
         with:
           node-version: '22'
 
-      - name: Install updated Minecraft dependencies
+      - name: Install dependencies
         run: |
           if [ ! -f package.json ]; then
             npm init -y
@@ -39,8 +39,119 @@ jobs:
 
           npm install --no-audit --no-fund \
             minecraft-protocol@latest \
-            minecraft-protocol-forge@latest \
-            minecraft-data@latest
+            minecraft-protocol-forge@latest
+
+      - name: Patch legacy Forge handshake
+        run: |
+          node <<'NODE'
+          const fs = require('node:fs');
+          const path = require('node:path');
+
+          const entry = require.resolve('minecraft-protocol-forge');
+          const file = path.join(
+            path.dirname(entry),
+            'src',
+            'client',
+            'forgeHandshake.js'
+          );
+
+          let source = fs.readFileSync(file, 'utf8');
+
+          const waitMarker =
+            '    case FMLHandshakeClientState.WAITINGSERVERCOMPLETE: {\n';
+
+          if (!source.includes(waitMarker)) {
+            throw new Error(
+              'Could not find WAITINGSERVERCOMPLETE in Forge library.'
+            );
+          }
+
+          if (!source.includes('PATCH_1710_ACK_FALLBACK_WAIT')) {
+            const patch = `
+              // PATCH_1710_ACK_FALLBACK_WAIT
+              if (
+                client.version === '1.7.10' &&
+                parsed.data.discriminator === 'HandshakeAck'
+              ) {
+                if (parsed.data.phase === 2) {
+                  debug('1.7.10: handling early HandshakeAck phase 2');
+                  writeAck(
+                    client,
+                    FMLHandshakeClientState.WAITINGSERVERCOMPLETE
+                  );
+                  client.fmlHandshakeState =
+                    FMLHandshakeClientState.PENDINGCOMPLETE;
+                  break;
+                }
+
+                if (parsed.data.phase === 3) {
+                  debug('1.7.10: handling HandshakeAck phase 3');
+                  writeAck(client, FMLHandshakeClientState.COMPLETE);
+                  client.fmlHandshakeState =
+                    FMLHandshakeClientState.COMPLETE;
+                  break;
+                }
+              }
+
+          `;
+
+            source = source.replace(waitMarker, waitMarker + patch);
+          }
+
+          const pendingMarker =
+            '    case FMLHandshakeClientState.PENDINGCOMPLETE: {\n';
+
+          if (!source.includes(pendingMarker)) {
+            throw new Error(
+              'Could not find PENDINGCOMPLETE in Forge library.'
+            );
+          }
+
+          if (!source.includes('PATCH_1710_ACK_FALLBACK_PENDING')) {
+            const patch = `
+              // PATCH_1710_ACK_FALLBACK_PENDING
+              if (
+                client.version === '1.7.10' &&
+                parsed.data.discriminator === 'HandshakeAck' &&
+                parsed.data.phase === 3
+              ) {
+                debug('1.7.10: completing alternate handshake');
+                writeAck(client, FMLHandshakeClientState.COMPLETE);
+                client.fmlHandshakeState =
+                  FMLHandshakeClientState.COMPLETE;
+                break;
+              }
+
+          `;
+
+            source = source.replace(pendingMarker, pendingMarker + patch);
+          }
+
+          const listenerOld = \`    if (packet.channel === 'FML|HS') {
+                fmlHandshakeStep(client, packet.data, options)
+              }\`;
+
+          const listenerNew = \`    if (packet.channel === 'FML|HS') {
+                try {
+                  fmlHandshakeStep(client, packet.data, options)
+                } catch (error) {
+                  debug('Forge handshake failed:', error.message)
+                  client.emit('error', error)
+                  client.end('Forge handshake failed')
+                }
+              }\`;
+
+          if (source.includes(listenerOld)) {
+            source = source.replace(listenerOld, listenerNew);
+          } else if (!source.includes('Forge handshake failed:')) {
+            throw new Error(
+              'Could not safely patch the Forge handshake listener.'
+            );
+          }
+
+          fs.writeFileSync(file, source);
+          console.log('Legacy Forge handshake patch applied.');
+          NODE
 
       - name: Run bot
         run: node bot.js
