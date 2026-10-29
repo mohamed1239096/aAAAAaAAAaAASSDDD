@@ -234,6 +234,8 @@ function patchProtocol26_3 () {
     names.forEach((name, id) => { mapper.mappings['0x' + id.toString(16).padStart(2, '0')] = name })
   }
 
+  skipUnneededPackets(protocol)
+
   // In 26.3 the "accept teleportation" packet the bot SENDS also carries the
   // position and rotation (teleport id, x, y, z, yaw, pitch). Without them the
   // server cannot decode it and kicks the bot.
@@ -245,6 +247,24 @@ function patchProtocol26_3 () {
     { name: 'yaw', type: 'f32' },
     { name: 'pitch', type: 'f32' }
   ]]
+}
+
+// While playing, the bot only needs a handful of server packets. Every other
+// packet (chunks, entities, recipes, ...) is NOT read at all. This matters
+// because 26.3 changed the layout of several of them, and when the library
+// fails to read one it throws away its receive buffer, which corrupts everything
+// after it (including the keep-alive, so the server kicks the bot for timing out).
+// The packets are still received and framed, only their content is ignored.
+const PLAY_PACKETS_TO_READ = ['keep_alive', 'ping', 'position', 'kick_disconnect', 'start_configuration']
+
+function skipUnneededPackets (protocol) {
+  if ((process.env.MC_PARSE_ALL || '').trim().toLowerCase() === 'true') return
+  const dir = protocol.play.toClient
+  const sw = dir.types.packet[1][1].type[1]
+  dir.types.packet_new_in_26_3 = ['container', []]
+  for (const name of Object.keys(sw.fields)) {
+    if (!PLAY_PACKETS_TO_READ.includes(name)) sw.fields[name] = 'packet_new_in_26_3'
+  }
 }
 
 // Work out the real host/port to connect to.
@@ -333,6 +353,7 @@ function connectOnce (addr, modList) {
       if (finished) return
       finished = true
       clearTimeout(loginTimer)
+      clearInterval(heartbeat)
       log(`Connection ended (${why})`)
       try { client.end() } catch (_) {}
       resolve({ joined })
@@ -347,11 +368,16 @@ function connectOnce (addr, modList) {
 
     client.on('connect', () => log('Connected, logging in ...'))
 
+    let heartbeat = null
     const markJoined = (extra) => {
       if (joined) return
       joined = true
       clearTimeout(loginTimer)
       log(`Joined the server as ${USERNAME}${extra || ''}`)
+      const joinedAt = Date.now()
+      heartbeat = setInterval(() => {
+        log(`Still connected (${Math.round((Date.now() - joinedAt) / 60000)} min online)`)
+      }, 5 * 60 * 1000)
     }
 
     // Show the connection phases (login -> configuration -> play) to make problems easy to locate.
@@ -367,6 +393,18 @@ function connectOnce (addr, modList) {
     })
 
     // Reply to server position packets so the server treats us as fully spawned.
+    // The library answers keep-alives by itself; log the first few so problems are easy to see.
+    let keepAlives = 0
+    client.on('keep_alive', () => {
+      keepAlives++
+      if (keepAlives <= 3) log(`Keep-alive #${keepAlives} received and answered`)
+    })
+
+    // Answer "ping" packets (configuration and play phase) with the matching "pong".
+    client.on('ping', (p) => {
+      try { client.write('pong', { id: p.id }) } catch (e) { log('pong failed:', e.message) }
+    })
+
     let lastPos = { x: 0, y: 0, z: 0, yaw: 0, pitch: 0 }
     client.on('position', (p) => {
       try {
