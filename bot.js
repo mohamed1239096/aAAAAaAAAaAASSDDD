@@ -233,6 +233,18 @@ function patchProtocol26_3 () {
     mapper.mappings = {}
     names.forEach((name, id) => { mapper.mappings['0x' + id.toString(16).padStart(2, '0')] = name })
   }
+
+  // In 26.3 the "accept teleportation" packet the bot SENDS also carries the
+  // position and rotation (teleport id, x, y, z, yaw, pitch). Without them the
+  // server cannot decode it and kicks the bot.
+  protocol.play.toServer.types.packet_teleport_confirm = ['container', [
+    { name: 'teleportId', type: 'varint' },
+    { name: 'x', type: 'f64' },
+    { name: 'y', type: 'f64' },
+    { name: 'z', type: 'f64' },
+    { name: 'yaw', type: 'f32' },
+    { name: 'pitch', type: 'f32' }
+  ]]
 }
 
 // Work out the real host/port to connect to.
@@ -355,11 +367,22 @@ function connectOnce (addr, modList) {
     })
 
     // Reply to server position packets so the server treats us as fully spawned.
+    let lastPos = { x: 0, y: 0, z: 0, yaw: 0, pitch: 0 }
     client.on('position', (p) => {
       try {
         if (p.teleportId !== undefined) {
-          // Modern servers (Paper etc.): confirm the teleport.
-          client.write('teleport_confirm', { teleportId: p.teleportId })
+          // Modern servers (Paper etc.): confirm the teleport. Values flagged as
+          // "relative" are offsets from our previous position.
+          const rel = (p.flags && typeof p.flags === 'object') ? p.flags : {}
+          lastPos = {
+            x: rel.x ? lastPos.x + p.x : p.x,
+            y: rel.y ? lastPos.y + p.y : p.y,
+            z: rel.z ? lastPos.z + p.z : p.z,
+            yaw: rel.yaw ? lastPos.yaw + p.yaw : p.yaw,
+            pitch: rel.pitch ? lastPos.pitch + p.pitch : p.pitch
+          }
+          // 26.3 wants the position in the confirmation too (see patchProtocol26_3).
+          client.write('teleport_confirm', PATCH_26_3 ? { teleportId: p.teleportId, ...lastPos } : { teleportId: p.teleportId })
           return
         }
         // Old servers (1.7.10): answer with our position.
