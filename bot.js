@@ -32,6 +32,11 @@ const num = (name, fallback) => {
 const VERSION = (process.env.MC_VERSION || '26.1').trim()
 const PROTOCOL = num('MC_PROTOCOL', 777)
 const FORGE = (process.env.MC_FORGE || '').trim().toLowerCase() === 'true'
+// MC_DEBUG=true prints every packet parse problem (very noisy, only for troubleshooting).
+const DEBUG = (process.env.MC_DEBUG || '').trim().toLowerCase() === 'true'
+// Minecraft 26.3 (protocol 777) renumbered some packets compared to 26.1; patched in below.
+const PATCH_26_3 = PROTOCOL === 777 && VERSION === '26.1' &&
+  (process.env.MC_PATCH || '').trim().toLowerCase() !== 'off'
 
 const RECONNECT_DELAY_MS = num('RECONNECT_DELAY_MS', 15000) // wait before reconnecting
 const PING_RETRIES = num('PING_RETRIES', 3) // server counts as down after this many failed pings
@@ -187,6 +192,49 @@ function attachForgeHandshake (client, forgeMods, logFn) {
 // Connection logic
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Minecraft 26.3 packet numbering
+//
+// The library only knows the packet tables of 26.1. Compared with 26.1, the
+// 26.3 server (from ViaVersion's protocol tables) inserts NEW server->client
+// packets and keeps the order of all others, which shifts the numbers behind
+// each insertion by one:
+//   configuration phase: 1 new packet at 0x0a                       (post_effects)
+//   play phase:          3 new packets at 0x25, 0x53, 0x7b          (add_transient_block,
+//                                                                    post_effects, swing_animation)
+// Packets the bot SENDS keep their numbers. This patch re-numbers the library's
+// 26.1 table in memory; the new packets are skipped (they are not needed to stay online).
+// ---------------------------------------------------------------------------
+const INSERTED_PACKETS_26_3 = { configuration: [0x0a], play: [0x25, 0x53, 0x7b] }
+let patched26_3 = false
+
+function patchProtocol26_3 () {
+  if (patched26_3) return
+  patched26_3 = true
+  const protocol = require('minecraft-data')('26.1').protocol
+
+  for (const [state, inserts] of Object.entries(INSERTED_PACKETS_26_3)) {
+    const dir = protocol[state].toClient
+    const packetType = dir.types.packet // ['container', [{name: 'name', type: ['mapper', {...}]}, {name: 'params', type: ['switch', {...}]}]]
+    const mapper = packetType[1][0].type[1]
+    const sw = packetType[1][1].type[1]
+
+    const names = Object.keys(mapper.mappings)
+      .sort((a, b) => parseInt(a, 16) - parseInt(b, 16))
+      .map((k) => mapper.mappings[k])
+
+    dir.types.packet_new_in_26_3 = ['container', []] // reads nothing: the packet is just skipped
+    for (const id of [...inserts].sort((a, b) => a - b)) {
+      const name = `new_in_26_3_${state}_${id}`
+      names.splice(id, 0, name)
+      sw.fields[name] = 'packet_new_in_26_3'
+    }
+
+    mapper.mappings = {}
+    names.forEach((name, id) => { mapper.mappings['0x' + id.toString(16).padStart(2, '0')] = name })
+  }
+}
+
 // Work out the real host/port to connect to.
 async function resolveAddress () {
   if (CONFIG_PORT) {
@@ -260,7 +308,8 @@ function connectOnce (addr, modList) {
       username: USERNAME,
       version: VERSION,
       // No password => offline mode.
-      keepAlive: true
+      keepAlive: true,
+      hideErrors: !DEBUG // don't spam the log with packets the library can't fully read
     }
     const client = mc.createClient(options)
     // The library fills in the protocol number from VERSION; replace it with the
@@ -286,10 +335,23 @@ function connectOnce (addr, modList) {
 
     client.on('connect', () => log('Connected, logging in ...'))
 
-    client.on('login', (packet) => {
+    const markJoined = (extra) => {
+      if (joined) return
       joined = true
       clearTimeout(loginTimer)
-      log(`Joined the server as ${USERNAME} (entity id ${packet.entityId})`)
+      log(`Joined the server as ${USERNAME}${extra || ''}`)
+    }
+
+    // Show the connection phases (login -> configuration -> play) to make problems easy to locate.
+    client.on('state', (newState) => {
+      log(`State: ${newState}`)
+      // Being in the play state means the server let us in, even if the "login"
+      // packet itself could not be read (it can change between versions).
+      if (newState === 'play') markJoined()
+    })
+
+    client.on('login', (packet) => {
+      if (!joined) markJoined(` (entity id ${packet.entityId})`)
     })
 
     // Reply to server position packets so the server treats us as fully spawned.
@@ -327,7 +389,13 @@ function connectOnce (addr, modList) {
     const reasonText = (r) => (typeof r === 'string' ? r : JSON.stringify(r))
     client.on('disconnect', (packet) => log('Refused by server:', reasonText(packet.reason)))
     client.on('kick_disconnect', (packet) => log('Kicked:', reasonText(packet.reason)))
-    client.on('error', (err) => log('Error:', err.message))
+    // Packets the library can't read are reported, but only the first few so the log stays readable.
+    let errorCount = 0
+    client.on('error', (err) => {
+      errorCount++
+      if (DEBUG || errorCount <= 8) log('Error:', String(err.message).split('\n')[0].slice(0, 300))
+      else if (errorCount === 9) log('Error: (more errors hidden, set MC_DEBUG=true to see all)')
+    })
 
     client.on('end', (reason) => finish(reason || 'closed'))
     client.on('close', () => finish('socket closed'))
@@ -335,6 +403,10 @@ function connectOnce (addr, modList) {
 }
 
 async function main () {
+  if (PATCH_26_3) {
+    patchProtocol26_3()
+    log('Applied the Minecraft 26.3 packet-number patch')
+  }
   const startedAt = Date.now()
   let failedJoins = 0
 
@@ -396,4 +468,4 @@ if (require.main === module) {
   })
 }
 
-module.exports = { attachForgeHandshake, parseRegistryHasMore }
+module.exports = { attachForgeHandshake, parseRegistryHasMore, patchProtocol26_3 }
