@@ -1,6 +1,6 @@
-// Minecraft bot for Paper 26.3 (default) or old Forge 1.7.10 (MC_FORGE=true)
+// Minecraft 1.7.10 Forge bot
 //
-// - Joins the server (and completes the Forge (FML) handshake itself if MC_FORGE=true).
+// - Joins the server and completes the Forge (FML) handshake itself.
 // - If it gets disconnected for ANY reason, it reconnects.
 // - If the server is down (ping fails several times in a row), it stops and
 //   exits cleanly. The GitHub Actions schedule starts it again later, and the
@@ -17,26 +17,12 @@ const mc = require('minecraft-protocol')
 const CONFIG_HOST = (process.env.MC_HOST || '').trim()
 const CONFIG_PORT = (process.env.MC_PORT || '').trim()
 const USERNAME = (process.env.MC_USERNAME || 'ServerBot').trim()
+const VERSION = '1.7.10'
+
 const num = (name, fallback) => {
   const v = parseInt(process.env[name] || '', 10)
   return Number.isFinite(v) ? v : fallback
 }
-
-// Which packet definitions the library should use. The newest ones it ships
-// for modern servers are "26.1". Minecraft 26.3 isn't in the library yet, so
-// the bot talks 26.1 packets but announces the real protocol number of the
-// server (777 = Minecraft 26.3). Set MC_VERSION / MC_PROTOCOL to change this.
-//   Paper 26.3  -> MC_VERSION=26.1  MC_PROTOCOL=777  (default)
-//   Paper 26.1  -> MC_VERSION=26.1  MC_PROTOCOL=775
-//   Forge 1.7.10-> MC_VERSION=1.7.10 MC_PROTOCOL=5 MC_FORGE=true
-const VERSION = (process.env.MC_VERSION || '26.1').trim()
-const PROTOCOL = num('MC_PROTOCOL', 777)
-const FORGE = (process.env.MC_FORGE || '').trim().toLowerCase() === 'true'
-// MC_DEBUG=true prints every packet parse problem (very noisy, only for troubleshooting).
-const DEBUG = (process.env.MC_DEBUG || '').trim().toLowerCase() === 'true'
-// Minecraft 26.3 (protocol 777) renumbered some packets compared to 26.1; patched in below.
-const PATCH_26_3 = PROTOCOL === 777 && VERSION === '26.1' &&
-  (process.env.MC_PATCH || '').trim().toLowerCase() !== 'off'
 
 const RECONNECT_DELAY_MS = num('RECONNECT_DELAY_MS', 15000) // wait before reconnecting
 const PING_RETRIES = num('PING_RETRIES', 3) // server counts as down after this many failed pings
@@ -192,81 +178,6 @@ function attachForgeHandshake (client, forgeMods, logFn) {
 // Connection logic
 // ---------------------------------------------------------------------------
 
-// ---------------------------------------------------------------------------
-// Minecraft 26.3 packet numbering
-//
-// The library only knows the packet tables of 26.1. Compared with 26.1, the
-// 26.3 server (from ViaVersion's protocol tables) inserts NEW server->client
-// packets and keeps the order of all others, which shifts the numbers behind
-// each insertion by one:
-//   configuration phase: 1 new packet at 0x0a                       (post_effects)
-//   play phase:          3 new packets at 0x25, 0x53, 0x7b          (add_transient_block,
-//                                                                    post_effects, swing_animation)
-// Packets the bot SENDS keep their numbers. This patch re-numbers the library's
-// 26.1 table in memory; the new packets are skipped (they are not needed to stay online).
-// ---------------------------------------------------------------------------
-const INSERTED_PACKETS_26_3 = { configuration: [0x0a], play: [0x25, 0x53, 0x7b] }
-let patched26_3 = false
-
-function patchProtocol26_3 () {
-  if (patched26_3) return
-  patched26_3 = true
-  const protocol = require('minecraft-data')('26.1').protocol
-
-  for (const [state, inserts] of Object.entries(INSERTED_PACKETS_26_3)) {
-    const dir = protocol[state].toClient
-    const packetType = dir.types.packet // ['container', [{name: 'name', type: ['mapper', {...}]}, {name: 'params', type: ['switch', {...}]}]]
-    const mapper = packetType[1][0].type[1]
-    const sw = packetType[1][1].type[1]
-
-    const names = Object.keys(mapper.mappings)
-      .sort((a, b) => parseInt(a, 16) - parseInt(b, 16))
-      .map((k) => mapper.mappings[k])
-
-    dir.types.packet_new_in_26_3 = ['container', []] // reads nothing: the packet is just skipped
-    for (const id of [...inserts].sort((a, b) => a - b)) {
-      const name = `new_in_26_3_${state}_${id}`
-      names.splice(id, 0, name)
-      sw.fields[name] = 'packet_new_in_26_3'
-    }
-
-    mapper.mappings = {}
-    names.forEach((name, id) => { mapper.mappings['0x' + id.toString(16).padStart(2, '0')] = name })
-  }
-
-  skipUnneededPackets(protocol)
-
-  // In 26.3 the "accept teleportation" packet the bot SENDS also carries the
-  // position and rotation (teleport id, x, y, z, yaw, pitch). Without them the
-  // server cannot decode it and kicks the bot.
-  protocol.play.toServer.types.packet_teleport_confirm = ['container', [
-    { name: 'teleportId', type: 'varint' },
-    { name: 'x', type: 'f64' },
-    { name: 'y', type: 'f64' },
-    { name: 'z', type: 'f64' },
-    { name: 'yaw', type: 'f32' },
-    { name: 'pitch', type: 'f32' }
-  ]]
-}
-
-// While playing, the bot only needs a handful of server packets. Every other
-// packet (chunks, entities, recipes, ...) is NOT read at all. This matters
-// because 26.3 changed the layout of several of them, and when the library
-// fails to read one it throws away its receive buffer, which corrupts everything
-// after it (including the keep-alive, so the server kicks the bot for timing out).
-// The packets are still received and framed, only their content is ignored.
-const PLAY_PACKETS_TO_READ = ['keep_alive', 'ping', 'position', 'kick_disconnect', 'start_configuration']
-
-function skipUnneededPackets (protocol) {
-  if ((process.env.MC_PARSE_ALL || '').trim().toLowerCase() === 'true') return
-  const dir = protocol.play.toClient
-  const sw = dir.types.packet[1][1].type[1]
-  dir.types.packet_new_in_26_3 = ['container', []]
-  for (const name of Object.keys(sw.fields)) {
-    if (!PLAY_PACKETS_TO_READ.includes(name)) sw.fields[name] = 'packet_new_in_26_3'
-  }
-}
-
 // Work out the real host/port to connect to.
 async function resolveAddress () {
   if (CONFIG_PORT) {
@@ -334,32 +245,25 @@ function connectOnce (addr, modList) {
     let finished = false
     let loginTimer = null
 
-    const options = {
+    const client = mc.createClient({
       host: addr.host,
       port: addr.port,
       username: USERNAME,
       version: VERSION,
       // No password => offline mode.
-      keepAlive: true,
-      hideErrors: !DEBUG // don't spam the log with packets the library can't fully read
-    }
-    const client = mc.createClient(options)
-    // The library fills in the protocol number from VERSION; replace it with the
-    // server's real one (it is only sent later, once the socket connects).
-    options.protocolVersion = PROTOCOL
-    log(`Using ${VERSION} packet data, protocol number ${PROTOCOL}${FORGE ? ', Forge handshake on' : ''}`)
+      keepAlive: true
+    })
 
     const finish = (why) => {
       if (finished) return
       finished = true
       clearTimeout(loginTimer)
-      clearInterval(heartbeat)
       log(`Connection ended (${why})`)
       try { client.end() } catch (_) {}
       resolve({ joined })
     }
 
-    if (FORGE) attachForgeHandshake(client, modList, log)
+    attachForgeHandshake(client, modList, log)
 
     // A join attempt that hangs forever gets cut off and retried.
     loginTimer = setTimeout(() => {
@@ -368,62 +272,15 @@ function connectOnce (addr, modList) {
 
     client.on('connect', () => log('Connected, logging in ...'))
 
-    let heartbeat = null
-    const markJoined = (extra) => {
-      if (joined) return
+    client.on('login', (packet) => {
       joined = true
       clearTimeout(loginTimer)
-      log(`Joined the server as ${USERNAME}${extra || ''}`)
-      const joinedAt = Date.now()
-      heartbeat = setInterval(() => {
-        log(`Still connected (${Math.round((Date.now() - joinedAt) / 60000)} min online)`)
-      }, 5 * 60 * 1000)
-    }
-
-    // Show the connection phases (login -> configuration -> play) to make problems easy to locate.
-    client.on('state', (newState) => {
-      log(`State: ${newState}`)
-      // Being in the play state means the server let us in, even if the "login"
-      // packet itself could not be read (it can change between versions).
-      if (newState === 'play') markJoined()
-    })
-
-    client.on('login', (packet) => {
-      if (!joined) markJoined(` (entity id ${packet.entityId})`)
+      log(`Joined the server as ${USERNAME} (entity id ${packet.entityId})`)
     })
 
     // Reply to server position packets so the server treats us as fully spawned.
-    // The library answers keep-alives by itself; log the first few so problems are easy to see.
-    let keepAlives = 0
-    client.on('keep_alive', () => {
-      keepAlives++
-      if (keepAlives <= 3) log(`Keep-alive #${keepAlives} received and answered`)
-    })
-
-    // Answer "ping" packets (configuration and play phase) with the matching "pong".
-    client.on('ping', (p) => {
-      try { client.write('pong', { id: p.id }) } catch (e) { log('pong failed:', e.message) }
-    })
-
-    let lastPos = { x: 0, y: 0, z: 0, yaw: 0, pitch: 0 }
     client.on('position', (p) => {
       try {
-        if (p.teleportId !== undefined) {
-          // Modern servers (Paper etc.): confirm the teleport. Values flagged as
-          // "relative" are offsets from our previous position.
-          const rel = (p.flags && typeof p.flags === 'object') ? p.flags : {}
-          lastPos = {
-            x: rel.x ? lastPos.x + p.x : p.x,
-            y: rel.y ? lastPos.y + p.y : p.y,
-            z: rel.z ? lastPos.z + p.z : p.z,
-            yaw: rel.yaw ? lastPos.yaw + p.yaw : p.yaw,
-            pitch: rel.pitch ? lastPos.pitch + p.pitch : p.pitch
-          }
-          // 26.3 wants the position in the confirmation too (see patchProtocol26_3).
-          client.write('teleport_confirm', PATCH_26_3 ? { teleportId: p.teleportId, ...lastPos } : { teleportId: p.teleportId })
-          return
-        }
-        // Old servers (1.7.10): answer with our position.
         client.write('position_look', {
           x: p.x,
           stance: p.y,
@@ -447,16 +304,9 @@ function connectOnce (addr, modList) {
     })
 
     // Kick messages (during login, and while playing)
-    const reasonText = (r) => (typeof r === 'string' ? r : JSON.stringify(r))
-    client.on('disconnect', (packet) => log('Refused by server:', reasonText(packet.reason)))
-    client.on('kick_disconnect', (packet) => log('Kicked:', reasonText(packet.reason)))
-    // Packets the library can't read are reported, but only the first few so the log stays readable.
-    let errorCount = 0
-    client.on('error', (err) => {
-      errorCount++
-      if (DEBUG || errorCount <= 8) log('Error:', String(err.message).split('\n')[0].slice(0, 300))
-      else if (errorCount === 9) log('Error: (more errors hidden, set MC_DEBUG=true to see all)')
-    })
+    client.on('disconnect', (packet) => log('Refused by server:', packet.reason))
+    client.on('kick_disconnect', (packet) => log('Kicked:', packet.reason))
+    client.on('error', (err) => log('Error:', err.message))
 
     client.on('end', (reason) => finish(reason || 'closed'))
     client.on('close', () => finish('socket closed'))
@@ -464,10 +314,6 @@ function connectOnce (addr, modList) {
 }
 
 async function main () {
-  if (PATCH_26_3) {
-    patchProtocol26_3()
-    log('Applied the Minecraft 26.3 packet-number patch')
-  }
   const startedAt = Date.now()
   let failedJoins = 0
 
@@ -492,9 +338,8 @@ async function main () {
     }
 
     const modList = (info.modinfo && info.modinfo.modList) || []
-    const serverName = info.version && info.version.name
-    log(`Server is up${serverName ? ` (${serverName}, protocol ${info.version.protocol})` : ''}.`,
-      FORGE ? `It reports ${modList.length} Forge mod(s): ${modList.map(m => `${m.modid}@${m.version}`).join(', ')}` : '')
+    log(`Server is up. It reports ${modList.length} Forge mod(s):`,
+      modList.map(m => `${m.modid}@${m.version}`).join(', '))
 
     const result = await connectOnce(addr, modList)
 
@@ -529,4 +374,4 @@ if (require.main === module) {
   })
 }
 
-module.exports = { attachForgeHandshake, parseRegistryHasMore, patchProtocol26_3 }
+module.exports = { attachForgeHandshake, parseRegistryHasMore }
