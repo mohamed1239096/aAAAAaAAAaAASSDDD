@@ -1,11 +1,15 @@
 name: Minecraft Bot
 
 on:
-  workflow_dispatch:        # start manually from the Actions tab
+  workflow_dispatch:          # start manually from the Actions tab
   schedule:
-    - cron: '0 */6 * * *'   # restart every 6 hours (a job can run max ~6h)
+    - cron: '*/10 * * * *'    # every 10 min: starts the bot if it is not running.
+                              # If the server is down the bot exits right away,
+                              # and the next check starts it again.
 
-# Never run two bots at once (same username would kick itself).
+# Only one bot at a time (the same username would kick itself).
+# A new scheduled run waits in the queue until the running one finishes,
+# so when the bot hands over at ~5h45m the next one takes over at once.
 concurrency:
   group: minecraft-bot
   cancel-in-progress: false
@@ -13,7 +17,7 @@ concurrency:
 jobs:
   run-bot:
     runs-on: ubuntu-latest
-    timeout-minutes: 350    # stop just before GitHub's 6h limit
+    timeout-minutes: 350      # GitHub's hard limit is 360
 
     steps:
       - uses: actions/checkout@v4
